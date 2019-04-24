@@ -563,14 +563,23 @@ bool CClient::Event_CheckWalkBuffer()
 		return true;
 	if ( (m_iWalkStepCount % 7) != 0 )	// only check when we have taken 8 steps
 		return true;
+	if (m_pChar->IsStatFlag(STATF_Freeze | STATF_Stone)) {
+		return true;
+	}
 
 	// Client only allows 4 steps of walk ahead.
 	ULONGLONG uCurTime = GetTickCount64();
-	int iTimeDiff = static_cast<int>((uCurTime - m_timeWalkStep) / 10);
-	int iTimeMin = m_pChar->IsStatFlag(STATF_OnHorse|STATF_Hovering) ? 70 : 140; // minimum time to move 8 steps
 
-	switch ( m_pChar->m_pPlayer->m_speedMode )
-	{
+	if (m_mountOrHoveringLastCheck == m_pChar->IsStatFlag(STATF_OnHorse | STATF_Hovering)) {
+		int iTimeDiff = static_cast<int>((uCurTime - m_timeWalkStep) / 10);
+		int iTimeMin = m_pChar->IsStatFlag(STATF_OnHorse | STATF_Hovering) ? 70 : 120; // minimum time to move 8 steps
+		//SPEEDMODE_DEFAULT,			// Foot: Default speed (120ms)	/ Mount: Default speed (70ms)
+		//SPEEDMODE_FAST,				// Foot: Double Speed (70ms)	/ Mount: Default speed (70ms)
+		//SPEEDMODE_SLOW,				// Foot: Always Walk (280ms)	/ Mount: Always Walk (120ms)
+		//SPEEDMODE_HYBRID,			// Foot: Always Run (120ms)		/ Mount: Always Walk (120ms)
+		//SPEEDMODE_GMTELEPORT		// GM Teleport (enhanced client only)
+		switch (m_pChar->m_pPlayer->m_speedMode)
+		{
 		case SPEEDMODE_DEFAULT:
 			break;
 		case SPEEDMODE_FAST:
@@ -580,42 +589,52 @@ bool CClient::Event_CheckWalkBuffer()
 			iTimeMin *= 2;
 			break;
 		case SPEEDMODE_HYBRID:
-			iTimeMin = 140;
+			iTimeMin = 120;
 			break;
-	}
+		}
 
-	if ( iTimeDiff > iTimeMin )
-	{
-		int	iRegen = ((iTimeDiff - iTimeMin) * g_Cfg.m_iWalkRegen) / 150;
-		if ( iRegen > g_Cfg.m_iWalkBuffer )
-			iRegen = g_Cfg.m_iWalkBuffer;
-		else if ( iRegen < -((g_Cfg.m_iWalkBuffer * g_Cfg.m_iWalkRegen) / 100) )
-			iRegen = -((g_Cfg.m_iWalkBuffer * g_Cfg.m_iWalkRegen) / 100);
-		iTimeDiff = iTimeMin + iRegen;
-	}
-
-	m_iWalkTimeAvg = m_iWalkTimeAvg + iTimeDiff - iTimeMin;
-	if ( m_iWalkTimeAvg > g_Cfg.m_iWalkBuffer )
-		m_iWalkTimeAvg = g_Cfg.m_iWalkBuffer;
-	else if ( m_iWalkTimeAvg < -g_Cfg.m_iWalkBuffer )
-		m_iWalkTimeAvg = -g_Cfg.m_iWalkBuffer;
-
-	if ( (m_iWalkTimeAvg < 0) && (iTimeDiff >= 0) )	// TICK_PER_SEC
-	{
-		// Walking too fast
-		if ( IsTrigUsed(TRIGGER_USEREXWALKLIMIT) )
+		if (iTimeDiff > iTimeMin)
 		{
-			if ( m_pChar->OnTrigger(CTRIG_UserExWalkLimit, m_pChar) != TRIGRET_RET_TRUE )
-				return false;
+			int	iRegen = ((iTimeDiff - iTimeMin) * g_Cfg.m_iWalkRegen) / 150;
+			if (iRegen > g_Cfg.m_iWalkBuffer)
+				iRegen = g_Cfg.m_iWalkBuffer;
+			else if (iRegen < -((g_Cfg.m_iWalkBuffer * g_Cfg.m_iWalkRegen) / 100))
+				iRegen = -((g_Cfg.m_iWalkBuffer * g_Cfg.m_iWalkRegen) / 100);
+			iTimeDiff = iTimeMin + iRegen;
+		}
+		else if (iTimeDiff == iTimeMin) {
+			iTimeDiff++;
+		}
+
+		m_iWalkTimeAvg = m_iWalkTimeAvg + iTimeDiff - iTimeMin;
+		if (m_iWalkTimeAvg > g_Cfg.m_iWalkBuffer)
+			m_iWalkTimeAvg = g_Cfg.m_iWalkBuffer;
+		else if (m_iWalkTimeAvg < -g_Cfg.m_iWalkBuffer)
+			m_iWalkTimeAvg = -g_Cfg.m_iWalkBuffer;
+
+		if (IsPriv(PRIV_DETAIL) && IsPriv(PRIV_DEBUG))
+			SysMessagef("Walkcheck trace: %i / %i (%i) :: %i", iTimeDiff, iTimeMin, m_iWalkTimeAvg);
+
+		if ((m_iWalkTimeAvg < 0) && (iTimeDiff >= 0))	// TICK_PER_SEC
+		{
+			m_iWalkTimeAvg = g_Cfg.m_iWalkBuffer;
+			// Walking too fast
+			DEBUG_WARN(("%s (%lx): Fast Walk ?\n", GetName(), GetSocketID()));
+			if (IsTrigUsed(TRIGGER_USEREXWALKLIMIT))
+			{
+				if (m_pChar->OnTrigger(CTRIG_UserExWalkLimit, m_pChar) != TRIGRET_RET_TRUE)
+					return false;
+			}
 		}
 	}
 
 	m_timeWalkStep = uCurTime;
+	m_mountOrHoveringLastCheck = m_pChar->IsStatFlag(STATF_OnHorse | STATF_Hovering);
 	return true;
 }
 
 // Client sent a walk request to server
-bool CClient::Event_Walk(BYTE rawdir, BYTE sequence)
+TRIGRET_TYPE CClient::Event_Walk(BYTE rawdir, BYTE sequence)
 {
 	ADDTOCALLSTACK("CClient::Event_Walk");
 	// The client is sending a walk request to server, so the server must check
@@ -628,77 +647,55 @@ bool CClient::Event_Walk(BYTE rawdir, BYTE sequence)
 	// The client sometimes echos 1 or 2 zeros or invalid echos when you first start
 	//	walking (the invalid non zeros happen when you log off and don't exit the
 	//	client.exe all the way and then log back in, XXX doesn't clear the stack)
-	if ( !m_pChar )
-		return false;
+	if (!m_pChar)
+		return TRIGRET_RET_FALSE;
 
 	DIR_TYPE dir = static_cast<DIR_TYPE>(rawdir & 0x0F);
-	if ( dir >= DIR_QTY )
+	if (dir >= DIR_QTY)
 	{
 		new PacketMovementRej(this, sequence);
-		return false;
+		return TRIGRET_RET_FALSE;
 	}
 
 	CPointMap pt = m_pChar->GetTopPoint();
 	CPointMap ptOld = pt;
 
-	if ( dir == m_pChar->m_dirFace )
+	if (dir == m_pChar->m_dirFace)
 	{
-		if ( IsSetEF(EF_FastWalkPrevention) )
-		{
-			// The fastest way to get system clock is using g_World.GetCurrentTime().GetTimeRaw() to
-			// read the value already stored by Sphere main timer. But this value is only updated at
-			// tenths of second precision, which won't work here because we need millisecs precision.
-			// So to reach this precision we must get the system clock manually at each walk request.
-			UINT64 iCurTime = CWorldClock::GetSystemClock();
-			if ( iCurTime < m_timeNextEventWalk )		// fastwalk detected
-			{
-				new PacketMovementRej(this, sequence);
-				return false;
-			}
-
-			UINT64 iDelay = 0;
-			if ( m_pChar->IsStatFlag(STATF_OnHorse|STATF_Hovering) )
-				iDelay = (rawdir & 0x80) ? 100 : 200;
-			else
-				iDelay = (rawdir & 0x80) ? 200 : 400;
-
-			// Decrease it a bit (2x16ms ticks) to avoid false-positive results if GetSystemClock()
-			// lacks accuracy for some reason, which often happens on CPUs with dynamic clock speed
-			iDelay -= 32;
-
-			m_timeNextEventWalk = iCurTime + iDelay;
-		}
-		else if ( !Event_CheckWalkBuffer() )
-		{
-			new PacketMovementRej(this, sequence);
-			return false;
-		}
-
 		pt.Move(dir);
 
 		// Check Z height. The client already knows this but doesn't tell us.
-		if ( m_pChar->CanMoveWalkTo(pt, true, false, dir) == NULL )
+		if (m_pChar->CanMoveWalkTo(pt, true, false, dir) == NULL)
 		{
 			new PacketMovementRej(this, sequence);
-			return false;
+			return TRIGRET_RET_FALSE;
 		}
 
-		if ( !m_pChar->MoveToChar(pt) )
+		if (!m_pChar->MoveToChar(pt))
 		{
 			new PacketMovementRej(this, sequence);
-			return false;
+			return TRIGRET_RET_FALSE;
 		}
 
 		// Check if I stepped on any item/teleport
 		TRIGRET_TYPE iRet = m_pChar->CheckLocation();
-		if ( iRet == TRIGRET_RET_FALSE )
+		if (iRet == TRIGRET_RET_FALSE)
 		{
-			if ( m_pChar->GetTopPoint() == pt )	// check if position still the same, because the movement can't be rejected if the char already got moved/teleported
+			if (m_pChar->GetTopPoint() == pt)	// check if position still the same, because the movement can't be rejected if the char already got moved/teleported
 			{
 				m_pChar->SetUnkPoint(ptOld);	// we already moved, so move back to previous location
 				new PacketMovementRej(this, sequence);
-				return false;
+				return TRIGRET_RET_FALSE;
 			}
+		} else if (iRet == TRIGRET_RET_DEFAULT)
+		{
+			return TRIGRET_RET_DEFAULT;
+		}
+
+		if (!Event_CheckWalkBuffer())
+		{
+			new PacketMovementRej(this, sequence);
+			return TRIGRET_RET_FALSE;
 		}
 
 		// Check if invisible chars will be revealed
@@ -707,27 +704,35 @@ bool CClient::Event_Walk(BYTE rawdir, BYTE sequence)
 		// Set running flag if I'm running
 		m_pChar->StatFlag_Mod(STATF_Fly, (rawdir & 0x80) ? true : false);
 
-		if ( iRet == TRIGRET_RET_TRUE )
+		if (iRet == TRIGRET_RET_TRUE)
 		{
 			new PacketMovementAck(this, sequence);
 			m_pChar->UpdateMove(ptOld, this);	// Who now sees me ?
 			addPlayerSee(ptOld);				// What new stuff do I now see ?
 
-			if ( m_pChar->m_pParty && ((m_iWalkStepCount % 10) == 0) )	// Send map waypoint location to party members at each 10 steps taken (enhanced clients only)
+			if (m_pChar->m_pParty && ((m_iWalkStepCount % 10) == 0))	// Send map waypoint location to party members at each 10 steps taken (enhanced clients only)
 				m_pChar->m_pParty->UpdateWaypointAll(m_pChar, PartyMember);
 		}
 
 		m_timeLastEventWalk = CServTime::GetCurrentTime();
-		m_iWalkStepCount++;					// Increase step count to use on walk buffer checks
+
 	}
 	else
 	{
+		if (m_pChar->IsStatFlag(STATF_OnHorse | STATF_Hovering) && !Event_CheckWalkBuffer())
+		{
+			new PacketMovementRej(this, sequence);
+			return TRIGRET_RET_FALSE;
+		}
 		// Just a change in dir
 		new PacketMovementAck(this, sequence);
 		m_pChar->m_dirFace = dir;
 		m_pChar->UpdateMove(ptOld, this);	// Who now sees me ?
 	}
-	return true;
+
+	m_iWalkStepCount++;					// Increase step count to use on walk buffer checks
+
+	return TRIGRET_RET_TRUE;
 }
 
 // Client selected an combat ability on book

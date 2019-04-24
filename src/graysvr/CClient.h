@@ -376,6 +376,7 @@ private:
 	int	m_iWalkTimeAvg;
 	int m_iWalkStepCount;		// count the actual steps (turning does not count)
 	ULONGLONG m_timeWalkStep;	// the last %8 walk step time
+	bool m_mountOrHoveringLastCheck;
 
 	// Screensize
 	struct __screensize
@@ -586,7 +587,7 @@ public:
 	void Event_VendorSell(CChar *pVendor, const VendorItem *items, size_t itemCount);
 	void Event_VendorSell_Cheater(int iCode = 0);
 	void Event_VirtueSelect(DWORD dwVirtue, CChar *pCharTarg);
-	bool Event_Walk(BYTE rawdir, BYTE sequence = 0);
+	TRIGRET_TYPE Event_Walk(BYTE rawdir, BYTE sequence = 0);
 	bool Event_CheckWalkBuffer();
 
 	TRIGRET_TYPE Menu_OnSelect(RESOURCE_ID_BASE rid, int iSelect, CObjBase *pObj);
